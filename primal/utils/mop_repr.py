@@ -626,6 +626,7 @@ class SMPLXParserRotcont(nn.Module):
             landmarks_extra = smplxout.v[:,landmarkids] 
             keypoints = torch.cat([jts_body, landmarks_extra], dim=-2)
             return keypoints
+        #TODO ADD VERTICES AS WELL AS JOINTS
         else:
             raise NotImplementedError
 

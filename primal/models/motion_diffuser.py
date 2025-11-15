@@ -486,6 +486,7 @@ class ARDiffusion(MotionDiffuserBase):
         betas_reshape = betas.reshape(nb*nt,-1)
         xb_reshape = xb.reshape(nb*nt,-1)
 
+        # TODO: NEED THIS TO RETURN VERICES AS WELL
         jts, markers = self.smplx_parser.forward_smplx(
             betas_reshape, 
             xb_reshape[:,:3], 
@@ -553,9 +554,6 @@ class ARDiffusion(MotionDiffuserBase):
         
         return xb
 
-
-
-
     def forward_one(self,batch):
         
         (
@@ -582,6 +580,8 @@ class ARDiffusion(MotionDiffuserBase):
                 betas, xb_all,
                 return_transf=False
             )
+             # TODO: NEED TO COMPUTE THE LOSS WITH IMUS using the vertices
+        ## forward kinematics
             kpts = self._fwd_smplx_seq(betas, xb)
             vel = kpts[:,1:] - kpts[:,:-1]
             if self.use_metric_velocity:
@@ -632,9 +632,11 @@ class ARDiffusion(MotionDiffuserBase):
         else:
             raise NotImplementedError
 
+        # TODO: NEED TO COMPUTE THE LOSS WITH IMUS using the vertices
         ## forward kinematics
         kpts_pred_fk = self._fwd_smplx_seq(betas[:,:nt], xb_pred)
         losses['loss_fk'] = fn_dist_fk(kpts_pred_fk, kpts)
+
         ## velocity consistency
         vel_pred_fk = kpts_pred_fk[:,1:] - kpts_pred_fk[:,:-1]
         if self.use_metric_velocity:
@@ -2642,4 +2644,439 @@ class ARDiffusionSpatial(ARDiffusion):
         
 
         return betas, [xb_gen], [kpts_gen]
+
+
+
+
+"""
+#################################################################################
+ARDiffusion with Acceleration Conditioning
+#################################################################################
+"""
+
+class ARDiffusionAcceleration(ARDiffusion):
+    """
+    ARDiffusion variant that conditions on accelerations instead of velocities.
+    Inherits from ARDiffusion and overrides methods to use accelerations.
+    """
+    
+    def forward_one(self, batch):
+        """
+        Training forward pass using accelerations instead of velocities.
+        """
+        (
+            betas_all, 
+            xb_all, 
+         ) = (
+                batch["betas"], 
+                batch["xb"], 
+         )
+        
+        losses = {}
+        fn_dist_fk = F.l1_loss if self.use_l1_norm_fk else F.mse_loss
+        fn_dist_acc = F.l1_loss if self.use_l1_norm_vel else F.mse_loss  # Reuse same config
+        
+        # data preprocessing and compute acceleration
+        with torch.no_grad():
+            betas = betas_all
+            ## process smplx params
+            if 'rotcont' in self.mrepr:
+                xb_all = self.aa2rotcont(xb_all)
+            
+            ## motion encoding
+            xb = self.canonicalization(
+                betas, xb_all,
+                return_transf=False
+            )
+            ## forward kinematics
+            kpts = self._fwd_smplx_seq(betas, xb)
+            
+            # Compute acceleration (second derivative)
+            # acc = kpts[:,2:] - 2*kpts[:,1:-1] + kpts[:,:-2]
+            # Alternative: via velocities
+            vel = kpts[:,1:] - kpts[:,:-1]
+            acc = vel[:,1:] - vel[:,:-1]
+            
+            if self.use_metric_velocity:
+                acc = acc * (self.fps ** 2)  # Acceleration scales with fps^2
+            
+            # Lose 2 frames instead of 1
+            xb = xb[:,:-2]
+            kpts = kpts[:,:-2]
+            nb, nt = xb.shape[:2]
+            
+            xs = torch.cat(
+                [
+                    xb, 
+                    kpts.reshape(nb, nt, -1),
+                    acc.reshape(nb, nt, -1)  # Use acceleration instead of velocity
+                ], dim=-1)
+            
+            ## add noise to the motion seed
+            xs_seed = xs[:,:1].detach().clone()
+            
+            # Sample a random timestep for each image
+            timesteps = torch.randint(
+                0, self.noise_scheduler.config.num_train_timesteps, 
+                (nb,), 
+                device=self.device,
+                dtype=torch.int64
+            )
+            
+            # Add noise to the clean images according to the noise magnitude at each timestep
+            xs_noise = self.noise_scheduler.add_noise(xs, torch.randn_like(xs), timesteps)
+        
+        ## fwd pass of motion model
+        cond_emb = self.emb_motionseed(xs_seed)
+        xs_pred = self.denoiser(
+            timesteps, 
+            xs_noise,
+            c_emb=cond_emb,
+            attn_mask = None,
+        )
+        
+        ## decompose prediction
+        xb_pred = xs_pred[...,:-self.n_kpts*6]
+        
+        # Compute the loss
+        ## denoiser loss
+        if self.hparams.scheduler.get('prediction_type', 'epsilon') == 'sample':
+            losses['loss_simple'] = F.mse_loss(xs_pred, xs)
+        else:
+            raise NotImplementedError
+
+        ## forward kinematics
+        kpts_pred_fk = self._fwd_smplx_seq(betas[:,:nt], xb_pred)
+        losses['loss_fk'] = fn_dist_fk(kpts_pred_fk, kpts)
+
+        ## acceleration consistency
+        acc_pred_fk = kpts_pred_fk[:,2:] - 2*kpts_pred_fk[:,1:-1] + kpts_pred_fk[:,:-2]
+        if self.use_metric_velocity:
+            acc_pred_fk = acc_pred_fk * (self.fps ** 2)
+        losses['loss_acc'] = fn_dist_acc(acc, acc_pred_fk)
+                
+        ## total loss
+        losses['loss'] = self.hparams.weight_simple*losses['loss_simple']  \
+            + self.hparams.weight_fk*losses['loss_fk'] \
+            + self.hparams.weight_acc*losses['loss_acc']  # Use weight_acc from config
+        
+        return losses
+
+
+    @torch.no_grad()
+    def generate_perpetual_navigation(
+            self,
+            batch,
+            n_inference_steps=10,
+            nt_max = 1200,
+            guidance_weight_mv=50,
+            guidance_weight_facing=25,
+            reproj_kpts=False,
+            snap_to_ground=False,
+            use_acc_perburbation=False,
+            switch_on_control=False,
+            switch_on_inertialization=True,
+            perform_principled_action=None,
+        ):
+        """Generate perpetual motion autoregressively with acceleration conditioning.
+        
+        Same as base ARDiffusion but uses accelerations instead of velocities.
+        """
+        # setup data io
+        (
+            betas_all, 
+            xb_all,
+            ori,
+         ) = (
+                batch["betas"], 
+                batch["xb"], 
+                batch["ori"],
+         )
+        
+        # setup denoiser
+        self.noise_scheduler.set_timesteps(n_inference_steps)
+        nt_tw = self.hparams.data.seq_len - 2  # Lose 2 frames for acceleration
+        if not self.use_metric_velocity:
+            ori = ori / self.fps
+
+        if perform_principled_action is not None:
+            if perform_principled_action == 'none':
+                use_acc_perburbation = False
+            else:
+                use_acc_perburbation = True
+        
+        ###################  loop of recursion #################
+        tt = 0
+        xb_gen = []
+        kpts_gen = []
+        acc_gen = []
+        acc_gen_avg = []
+
+        nb = 1    
+        betas = betas_all[:,:1]
+
+        runtimelog = {
+            'canonicalization': [],
+            'control_embedding': [],
+            'reverse_diffusion': [],
+            'post_processing': [],
+        }
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+
+        while tt < nt_max:
+            if tt + nt_tw > nt_max:
+                break
+
+            ################### 1. canonicalization ################
+            start_event.record()
+            if tt==0:
+                if 'rotcont' in self.mrepr:
+                    xb_all = self.aa2rotcont(xb_all)
+
+                if snap_to_ground:
+                    xb_all = self.snap_init_cond_to_ground(betas_all, xb_all)
+
+                xb, rotmat_c, transl_c = self.canonicalization(
+                    betas_all, xb_all,
+                    return_transf=True
+                )
+                kpts = self._fwd_smplx_seq(betas_all, xb)
+                
+                # Compute acceleration seed
+                vel_seed_c = kpts[:,1:] - kpts[:,:-1]
+                acc_seed_c = vel_seed_c[:,1:] - vel_seed_c[:,:-1]
+                if self.use_metric_velocity:
+                    acc_seed_c = acc_seed_c * (self.fps ** 2)
+
+                xb_seed_c = xb[:,:-2]
+                kpts_seed_c = kpts[:,:-2]
+                
+            else:
+                ## recompute keypoint locations and accelerations
+                xb_seed_w = xb_gen_w_[:,-1:].detach().clone()
+                xb_seed_c, rotmat_c, transl_c = self.canonicalization(
+                    betas.repeat(1,xb_seed_w.shape[1],1), xb_seed_w,return_transf=True)
+                
+                if reproj_kpts:
+                    kpts_seed_c = self._fwd_smplx_seq(
+                        betas.repeat(1,xb_seed_c.shape[1],1), xb_seed_c
+                    )
+                else:
+                    kpts_seed_w = kpts_gen_w_[:,-1:].detach().clone()
+                    kpts_seed_c = torch.einsum(
+                        'bij,btpj->btpi', 
+                        rotmat_c.permute(0,2,1), 
+                        kpts_seed_w-transl_c.unsqueeze(-2)
+                    )
+                
+                # Need last 2 frames to compute acceleration
+                # For simplicity, recompute from keypoints
+                if kpts_seed_c.shape[1] >= 2:
+                    vel_seed_c = kpts_seed_c[:,1:] - kpts_seed_c[:,:-1]
+                    if vel_seed_c.shape[1] >= 1:
+                        acc_seed_c = vel_seed_c[:,1:] - vel_seed_c[:,:-1]
+                    else:
+                        # Fallback: use previous window's acceleration
+                        acc_seed_w = acc_gen_w_[:,-1:].detach().clone()
+                        acc_seed_c = torch.einsum(
+                            'bij,btpj->btpi', 
+                            rotmat_c.permute(0,2,1),
+                            acc_seed_w
+                        )
+                else:
+                    # Fallback: use previous window's acceleration
+                    acc_seed_w = acc_gen_w_[:,-1:].detach().clone()
+                    acc_seed_c = torch.einsum(
+                        'bij,btpj->btpi', 
+                        rotmat_c.permute(0,2,1),
+                        acc_seed_w
+                    )
+
+            if use_acc_perburbation and tt==0:
+                if perform_principled_action=='left_kick':
+                    idx = [4,7] # left leg kick
+                    perturb = torch.tensor([[[0,0,1]]]).to(self.device) * 0.5
+                    acc_seed_c[:,:,idx] += perturb
+                elif perform_principled_action=='right_kick':
+                    idx = [5,8] # right leg kick
+                    perturb = torch.tensor([[[0,0,1]]]).to(self.device) * 0.5
+                    acc_seed_c[:,:,idx] += perturb
+                elif perform_principled_action=='run_forward':
+                    idx = [0,12,16,17] # pelvis, neck, shoulders
+                    perturb = torch.tensor([[[0,0,1]]]).to(self.device) * 0.5
+                    acc_seed_c[:,:,idx] += perturb
+                elif perform_principled_action=='flip_back':
+                    idx = [15] # head
+                    perturb = torch.tensor([[[0,0,-1]]]).to(self.device) * 1
+                    acc_seed_c[:,:,idx] += perturb
+                elif perform_principled_action=='roll_forward':
+                    idx = [15, 16, 17, 18, 19] # head and shoulders and elbows
+                    perturb = torch.tensor([[[0,-1,1]]]).to(self.device) * 0.5
+                    acc_seed_c[:,:,idx] += perturb
+
+            end_event.record()
+            torch.cuda.synchronize()
+            runtimelog['canonicalization'].append(start_event.elapsed_time(end_event))
+
+            ################### 2. control embedding ################
+            start_event.record()
+            
+            ## obtain guidance velocity (still use ori for guidance direction)
+            ori_c = torch.einsum('bij,btj->bti', rotmat_c.permute(0,2,1),ori)
+            
+            xs_seed = torch.cat([xb_seed_c, 
+                                kpts_seed_c.reshape(nb, 1, -1),
+                                acc_seed_c.reshape(nb, 1, -1)],  # Use acceleration
+                                dim=-1)
+            
+            ## encode of the motion seed
+            cond_emb = self.emb_motionseed(xs_seed)
+        
+            end_event.record()
+            torch.cuda.synchronize()
+            runtimelog['control_embedding'].append(start_event.elapsed_time(end_event))
+            
+            ################### 3. reverse diffusion ################
+            start_event.record()
+            input = torch.randn(nb, nt_tw, self.x_dim).to(self.device)
+
+            for i, t in enumerate(self.noise_scheduler.timesteps):
+                t_tensor = t.to(self.device).unsqueeze(0).repeat(input.shape[0])
+                
+                modeloutput = self.denoiser(
+                    t_tensor, 
+                    input,
+                    c_emb=cond_emb,
+                    attn_mask = None,
+                    )
+                
+                # classifier guidance on the accelerations
+                if switch_on_control:
+                    ## 1) moving direction, based on average acceleration
+                    accs_reshaped = modeloutput[...,-3*self.n_kpts:].reshape(nb, -1, self.n_kpts, 3)
+                    ### on the mean acceleration
+                    grad_mv_accs = 2*(accs_reshaped.mean(dim=[1,2],keepdim=True) - ori_c.unsqueeze(-2)) #[nb,1,1,3]
+                    grad_mv_accs = grad_mv_accs.repeat(1, nt_tw, self.n_kpts,1).reshape(nb, nt_tw, -1)
+                    grad_mv_pad = torch.zeros_like(input[...,:-3*self.n_kpts])
+                    grad_mv = torch.cat([grad_mv_pad, grad_mv_accs], dim=-1)
+
+                    ## 2) facing direction (same as base class)
+                    ori_cn = ori_c / (ori_c.norm(dim=-1,keepdim=True) + 1e-6)
+                    kpts_reshaped = modeloutput[...,-6*self.n_kpts:-3*self.n_kpts].reshape(nb, -1, self.n_kpts, 3)
+                    kpts_last = kpts_reshaped[:,-1]
+                    x_axis = kpts_last[:,1] - kpts_last[:,2]
+                    x_axis[...,1] = 0
+                    x_axis_norm = x_axis.norm(dim=-1, keepdim=True)
+                    y_axis = torch.tensor([[0,1,0]]).float().to(self.device).repeat(nb, 1)
+                    ssmat_y = skew_symmetric_matrix(y_axis)
+                    idty = torch.eye(3).to(self.device).unsqueeze(0)
+                    grad_normalization = (idty - (x_axis.unsqueeze(-1) @ x_axis.unsqueeze(-2))/(x_axis_norm**2))/x_axis_norm
+                    grad_p = 2*(x_axis/x_axis_norm @ ssmat_y -ori_cn) @ (-ssmat_y) @ grad_normalization
+                    grad_kpts_all = torch.zeros_like(kpts_reshaped)
+                    grad_kpts_all[:,-1:,1] = grad_p
+                    grad_kpts_all[:,-1:,2] = -grad_p
+                    grad_facing = torch.zeros_like(input)
+                    grad_facing[...,-6*self.n_kpts:-3*self.n_kpts] = grad_kpts_all.reshape(nb, nt_tw, -1)
+
+                    guidance_grad_ori = -(guidance_weight_facing * grad_facing 
+                                            + guidance_weight_mv * grad_mv)
+                else:
+                    guidance_grad_ori = None
+                
+                # step
+                stepoutput = self.noise_scheduler.step(
+                    modeloutput, t, input, 
+                    guidance=guidance_grad_ori
+                )
+                input = stepoutput.prev_sample
+
+            ## project to above the ground floor
+            if snap_to_ground: 
+                xb_pred = input[:,:,:-self.n_kpts*6]
+                jts_c = self._fwd_smplx_seq(betas.repeat(1, nt_tw, 1), xb_pred)
+                jts_w = torch.einsum('bij,btpj->btpi', rotmat_c, jts_c)+transl_c.unsqueeze(-2)
+                heights = jts_w[...,1]
+                heights_flatten = heights.view(heights.size(0), -1)
+                if torch.all(heights_flatten>0):
+                    tpidx_flatten = heights_flatten.abs().argmin(dim=1)
+                else:    
+                    tpidx_flatten = heights_flatten.argmin(dim=1)
+                dist2ground = heights_flatten[:,tpidx_flatten].item()
+                input[...,1] -= (dist2ground - 0.01)    
+
+            # inertialization
+            if switch_on_inertialization:
+                output = inertialize(xs_seed, input, omega=10.0, dt=1.0/30.0)
+            else:
+                output = input
+            
+            end_event.record()
+            torch.cuda.synchronize()
+            runtimelog['reverse_diffusion'].append(start_event.elapsed_time(end_event))
+            
+            ################### 4. transform back to world coordinate ################
+            start_event.record()
+            output_betas = betas.repeat(1, nt_tw, 1)
+            
+            xb_gen_c = output[...,:-self.n_kpts*6]
+            kpts_gen_c = output[...,-self.n_kpts*6:-self.n_kpts*3].reshape(nb,-1,self.n_kpts,3)
+            acc_gen_c = output[...,-self.n_kpts*3:].reshape(nb,-1,self.n_kpts,3)  # Acceleration
+            
+            ## transform back to the original world coordinate
+            xb_gen_w_ = self.smplx_parser.update_transl_glorot_seq(
+                rotmat_c, transl_c, output_betas, xb_gen_c, fwd_transf=True)
+            kpts_gen_w_ = torch.einsum('bij,btpj->btpi', rotmat_c, kpts_gen_c) + transl_c.unsqueeze(-2)
+            acc_gen_w_ = torch.einsum('bij,btpj->btpi', rotmat_c, acc_gen_c)
+            
+            xb_gen.append(xb_gen_w_[:,:-2].detach().clone())  # Lose 2 frames
+            kpts_gen.append(kpts_gen_w_[:,:-2].detach().clone())
+            acc_gen.append(acc_gen_w_[:,:-2].detach().clone())
+            acc_gen_avg.append(acc_gen_w_[:,:-2].mean(dim=[1,2],keepdim=True).repeat(1,nt_tw-2,1,1).detach().clone())
+            
+            end_event.record()
+            torch.cuda.synchronize()
+            runtimelog['post_processing'].append(start_event.elapsed_time(end_event))
+
+            tt += nt_tw - 2  # Adjust step size
+
+        # cat all sequences
+        xb_gen = torch.cat(xb_gen, dim=1)
+        if 'rotcont' in self.mrepr:
+            xb_gen_aa = self.rotcont2aa(xb_gen)
+        else:
+            xb_gen_aa = xb_gen
+        kpts_gen = torch.cat(kpts_gen, dim=1)
+        acc_gen = torch.cat(acc_gen, dim=1)
+        acc_gen_avg = torch.cat(acc_gen_avg, dim=1)
+        if not self.use_metric_velocity:
+            acc_gen *= (self.fps ** 2)
+            acc_gen_avg *= (self.fps ** 2)
+        
+        # For visualization, compute velocities from keypoints
+        vel_gen = kpts_gen[:,1:] - kpts_gen[:,:-1]
+        if not self.use_metric_velocity:
+            vel_gen *= self.fps
+        
+        ################# generate rays: start ######################
+        # Use computed velocities for visualization
+        vel_dir = vel_gen / vel_gen.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        step_size = 0.02
+        steps = torch.arange(0, 10).view(1, 1, 1, 1, -1).to(self.device)
+        rays = kpts_gen[:,:-1].unsqueeze(-1) + vel_dir.unsqueeze(-1) * steps * step_size
+        rays = rays.permute(0, 1, 2, 4, 3)
+        velnorms = vel_gen.norm(dim=-1,keepdim=True).unsqueeze(-1).repeat(1,1,1,10,1)
+        kpts_gen_vis = torch.cat([rays, velnorms], dim=-1)
+        kpts_gen_vis = kpts_gen_vis.reshape(nb,kpts_gen.shape[1]-1,-1,4)
+        ################# generate rays: end ######################
+
+        # stats runtime
+        outputlogs = f"average runtime to generate a motion primitive ({nt_tw} frames, {1000*nt_tw/30.:.3f} ms ): \n"
+        avg = 0
+        for k, v in runtimelog.items():
+            outputlogs += f"-- {k}: {np.mean(v):.3f} ms\n"
+            avg += np.mean(v)
+        outputlogs += f"-- total: {avg:.3f} ms\n"
+
+        return betas, [xb_gen_aa], [kpts_gen_vis], outputlogs
 
