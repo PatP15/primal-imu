@@ -1,0 +1,2 @@
+/var/slurmd/spool/slurmd/job46185468/slurm_script: line 24: 3277773 Killed                  python scripts/train.py
+[2025-11-16T13:35:13.271] error: Detected 1 oom_kill event in StepId=46185468.batch. Some of the step tasks have been OOM Killed.

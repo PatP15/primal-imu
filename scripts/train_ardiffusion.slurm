@@ -1,22 +1,25 @@
 #!/bin/bash
 
 #SBATCH -J primal_ardiffusion
-#SBATCH -p test_gpu
+#SBATCH -p gpu_test
 #SBATCH -c 8
 #SBATCH -t 1:00:00
-#SBATCH --mem=64G
-#SBATCH -o /n/home01/ppuma/primal-imu/logs/ardiffusion_%j.out
-#SBATCH -e /n/home01/ppuma/primal-imu/logs/ardiffusion_%j.err
+#SBATCH --mem=128G
+#SBATCH -o /n/home01/ppuma/Github/primal-imu/scripts/ardiff_logs/ardiffusion_%j.out
 #SBATCH --gres=gpu:1
 
+#where the data and model at
 export AMASS_DATA_PATH=/n/netscratch/walsh_lab_seas/Everyone/ppuma/datasets/AMASS/amass_data
 export MODEL_REGISTRY_PATH=/n/netscratch/walsh_lab_seas/Everyone/ppuma/model-registry
 # Load the required Python module.
 module load python/3.12.8-fasrc01
 
+# add to python path
+export PYTHONPATH=/n/home01/ppuma/Github/primal-imu:$PYTHONPATH
+
 # Navigate to project directory
-cd /n/home01/ppuma/primal-imu
+cd /n/home01/ppuma/Github/primal-imu
 
 # Activate conda environment and run training
-srun -c 8 bash -c "conda init && source ~/.bashrc && conda activate primal-imu && python scripts/train.py"
+mamba activate primal-imu && python scripts/train.py
 

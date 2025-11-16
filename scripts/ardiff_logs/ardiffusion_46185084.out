@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/n/home01/ppuma/Github/primal-imu/scripts/train.py", line 3, in <module>
+    from primal.data import mixed_motion_dm
+ModuleNotFoundError: No module named 'primal'
