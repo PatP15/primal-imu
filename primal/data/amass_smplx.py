@@ -30,10 +30,19 @@ class AMASS_SMPLX_NEUTRAL(Dataset):
         if self.read_all_files_to_ram:
             self.all_seq = []
             for file in self.npz_files:
-                with open(file, 'rb') as f:
-                    data = np.load(f, allow_pickle=True)
-                    data_dict = {key: data[key] for key in data}
-                    self.all_seq.append(data_dict)
+                try:
+                    with open(file, 'rb') as f:
+                        data = np.load(f, allow_pickle=True)
+                        # Check for required keys before adding
+                        required_keys = ['trans', 'root_orient', 'pose_body', 'betas', 'mocap_frame_rate', 'jts_body']
+                        if all(key in data for key in required_keys):
+                            data_dict = {key: data[key] for key in data}
+                            self.all_seq.append(data_dict)
+                        else:
+                            missing = [key for key in required_keys if key not in data]
+                            logger.warning(f"Skipping {file}: missing keys {missing}")
+                except Exception as e:
+                    logger.warning(f"Skipping {file}: {e}")
         else:
             self.all_seq = self.npz_files
 
@@ -42,49 +51,61 @@ class AMASS_SMPLX_NEUTRAL(Dataset):
         return len(self.all_seq)
 
     def __getitem__(self, index):
-        if self.read_all_files_to_ram:
-            data = self.all_seq[index] 
-        else:
-            with open(self.all_seq[index], 'rb') as f:
-                datafile = np.load(f, allow_pickle=True)
-                data = {key: datafile[key] for key in datafile}
-            
-        stride = int(data['mocap_frame_rate'] // self.tgt_fps)
-        if stride < 1:
-            return None
-        transl = torch.tensor(data['trans']).float()[::stride]
-        glorot_aa = torch.tensor(data['root_orient']).float()[::stride]
-        poses = torch.tensor(data['pose_body']).float()[::stride]
-        jts = torch.tensor(data['jts_body']).float()[::stride]
-        betas = torch.tensor(data['betas']).float()
-        if self.shape_noise_sigma > 1e-6:
-            betas += self.shape_noise_sigma * torch.randn_like(betas)
-        betas = betas.repeat(transl.shape[0],1)
-        
-        if self.seq_len >=0:
-            if transl.shape[0] <= self.seq_len: # remove very short sequences
+        try:
+            if self.read_all_files_to_ram:
+                data = self.all_seq[index] 
+            else:
+                with open(self.all_seq[index], 'rb') as f:
+                    datafile = np.load(f, allow_pickle=True)
+                    data = {key: datafile[key] for key in datafile}
+                
+            # Check for required keys
+            required_keys = ['trans', 'root_orient', 'pose_body', 'betas', 'mocap_frame_rate', 'jts_body']
+            missing_keys = [key for key in required_keys if key not in data]
+            if missing_keys:
+                logger.warning(f"Missing keys {missing_keys} in file {self.all_seq[index] if not self.read_all_files_to_ram else 'loaded data'}")
                 return None
-            seq_start = np.random.randint(0,transl.shape[0]-self.seq_len)
-            transl = transl[seq_start:seq_start + self.seq_len]
-            glorot_aa = glorot_aa[seq_start:seq_start + self.seq_len]
-            poses = poses[seq_start:seq_start + self.seq_len]
-            betas = betas[seq_start:seq_start + self.seq_len]
-            jts = jts[seq_start:seq_start + self.seq_len]
+            
+            stride = int(data['mocap_frame_rate'] // self.tgt_fps)
+            if stride < 1:
+                return None
+            transl = torch.tensor(data['trans']).float()[::stride]
+            glorot_aa = torch.tensor(data['root_orient']).float()[::stride]
+            poses = torch.tensor(data['pose_body']).float()[::stride]
+            jts = torch.tensor(data['jts_body']).float()[::stride]
+            betas = torch.tensor(data['betas']).float()
+            
+            if self.shape_noise_sigma > 1e-6:
+                betas += self.shape_noise_sigma * torch.randn_like(betas)
+            betas = betas.repeat(transl.shape[0],1)
+            
+            if self.seq_len >=0:
+                if transl.shape[0] <= self.seq_len: # remove very short sequences
+                    return None
+                seq_start = np.random.randint(0,transl.shape[0]-self.seq_len)
+                transl = transl[seq_start:seq_start + self.seq_len]
+                glorot_aa = glorot_aa[seq_start:seq_start + self.seq_len]
+                poses = poses[seq_start:seq_start + self.seq_len]
+                betas = betas[seq_start:seq_start + self.seq_len]
+                jts = jts[seq_start:seq_start + self.seq_len]
 
-        else:
-            nt = transl.shape[0]
-            transl = transl[:nt//2*2]
-            glorot_aa = glorot_aa[:nt//2*2]
-            poses = poses[:nt//2*2]
-            betas = betas[:nt//2*2]
-        xb = torch.cat([transl, glorot_aa, poses],dim=-1)
+            else:
+                nt = transl.shape[0]
+                transl = transl[:nt//2*2]
+                glorot_aa = glorot_aa[:nt//2*2]
+                poses = poses[:nt//2*2]
+                betas = betas[:nt//2*2]
+            xb = torch.cat([transl, glorot_aa, poses],dim=-1)
 
-        if self.reverse_time_dimension:
-            xb = xb.flip(0)
-            betas = betas.flip(0)
-            jts = jts.flip(0)
+            if self.reverse_time_dimension:
+                xb = xb.flip(0)
+                betas = betas.flip(0)
+                jts = jts.flip(0)
 
-        return {"betas":betas, "xb": xb, "jts_body": jts}
+            return {"betas":betas, "xb": xb, "jts_body": jts}
+        except Exception as e:
+            logger.warning(f"Error loading sample {index}: {e}")
+            return None
 
 
 
