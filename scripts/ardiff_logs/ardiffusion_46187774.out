@@ -1,0 +1,119 @@
+[[36m2025-11-16 13:53:01,853[0m][[34m__main__[0m][[32mINFO[0m] - Instantiating trainer <lightning.Trainer>[0m
+/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/fabric/plugins/environments/slurm.py:204: The `srun` command is available on your system but is not used. HINT: If your intention is to run Lightning on SLURM, prepend your python command with `srun` like so: srun python scripts/train.py ...
+INFO: GPU available: True (cuda), used: True
+[[36m2025-11-16 13:53:02,128[0m][[34mlightning.pytorch.utilities.rank_zero[0m][[32mINFO[0m] - GPU available: True (cuda), used: True[0m
+INFO: TPU available: False, using: 0 TPU cores
+[[36m2025-11-16 13:53:02,128[0m][[34mlightning.pytorch.utilities.rank_zero[0m][[32mINFO[0m] - TPU available: False, using: 0 TPU cores[0m
+INFO: Initializing distributed: GLOBAL_RANK: 0, MEMBER: 1/1
+[[36m2025-11-16 13:53:02,205[0m][[34mlightning.fabric.utilities.distributed[0m][[32mINFO[0m] - Initializing distributed: GLOBAL_RANK: 0, MEMBER: 1/1[0m
+[W1116 13:53:02.668417765 socket.cpp:752] [c10d] The client socket cannot be initialized to connect to [localhost]:50673 (errno: 97 - Address family not supported by protocol).
+INFO: ----------------------------------------------------------------------------------------------------
+distributed_backend=nccl
+All distributed processes registered. Starting with 1 processes
+----------------------------------------------------------------------------------------------------
+
+[[36m2025-11-16 13:53:04,064[0m][[34mlightning.pytorch.utilities.rank_zero[0m][[32mINFO[0m] - ----------------------------------------------------------------------------------------------------
+distributed_backend=nccl
+All distributed processes registered. Starting with 1 processes
+----------------------------------------------------------------------------------------------------
+[0m
+INFO: LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [MIG-94df735d-54d3-575a-b9cd-d15faa82c62f]
+[[36m2025-11-16 13:53:07,699[0m][[34mlightning.pytorch.accelerators.cuda[0m][[32mINFO[0m] - LOCAL_RANK: 0 - CUDA_VISIBLE_DEVICES: [MIG-94df735d-54d3-575a-b9cd-d15faa82c62f][0m
+INFO: 
+  | Name           | Type                 | Params | Mode 
+----------------------------------------------------------------
+0 | smplx_parser   | SMPLXParserRotcont   | 0      | eval 
+1 | denoiser       | TransformerInContext | 13.4 M | train
+2 | emb_motionseed | Linear               | 68.6 K | train
+----------------------------------------------------------------
+13.5 M    Trainable params
+0         Non-trainable params
+13.5 M    Total params
+53.953    Total estimated model params size (MB)
+113       Modules in train mode
+3         Modules in eval mode
+[[36m2025-11-16 13:53:08,556[0m][[34mlightning.pytorch.callbacks.model_summary[0m][[32mINFO[0m] - 
+  | Name           | Type                 | Params | Mode 
+----------------------------------------------------------------
+0 | smplx_parser   | SMPLXParserRotcont   | 0      | eval 
+1 | denoiser       | TransformerInContext | 13.4 M | train
+2 | emb_motionseed | Linear               | 68.6 K | train
+----------------------------------------------------------------
+13.5 M    Trainable params
+0         Non-trainable params
+13.5 M    Total params
+53.953    Total estimated model params size (MB)
+113       Modules in train mode
+3         Modules in eval mode[0m
+/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/trainer/connectors/data_connector.py:433: The 'train_dataloader' does not have many workers which may be a bottleneck. Consider increasing the value of the `num_workers` argument` to `num_workers=7` in the `DataLoader` to improve performance.
+/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/loops/fit_loop.py:310: The number of training batches (33) is smaller than the logging interval Trainer(log_every_n_steps=100). Set a lower value for log_every_n_steps if you want to see logs for the training epoch.
+/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/loops/fit_loop.py:527: Found 3 module(s) in eval mode at the start of training. This may lead to unexpected behavior during training. If this is intentional, you can ignore this warning.
+Training: |          | 0/? [00:00<?, ?it/s]Training: |          | 0/? [00:00<?, ?it/s]Epoch 0:   0%|          | 0/33 [00:00<?, ?it/s]Error executing job with overrides: []
+Traceback (most recent call last):
+  File "/n/home01/ppuma/Github/primal-imu/scripts/train.py", line 102, in train
+    trainer.fit(model = model, datamodule = dm)
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/trainer/trainer.py", line 560, in fit
+    call._call_and_handle_interrupt(
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/trainer/call.py", line 48, in _call_and_handle_interrupt
+    return trainer.strategy.launcher.launch(trainer_fn, *args, trainer=trainer, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/strategies/launchers/subprocess_script.py", line 105, in launch
+    return function(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/trainer/trainer.py", line 598, in _fit_impl
+    self._run(model, ckpt_path=ckpt_path)
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/trainer/trainer.py", line 1011, in _run
+    results = self._run_stage()
+              ^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/trainer/trainer.py", line 1055, in _run_stage
+    self.fit_loop.run()
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/loops/fit_loop.py", line 216, in run
+    self.advance()
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/loops/fit_loop.py", line 458, in advance
+    self.epoch_loop.run(self._data_fetcher)
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/loops/training_epoch_loop.py", line 152, in run
+    self.advance(data_fetcher)
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/loops/training_epoch_loop.py", line 310, in advance
+    batch, _, __ = next(data_fetcher)
+                   ^^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/loops/fetchers.py", line 134, in __next__
+    batch = super().__next__()
+            ^^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/loops/fetchers.py", line 61, in __next__
+    batch = next(self.iterator)
+            ^^^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/utilities/combined_loader.py", line 341, in __next__
+    out = next(self._iterator)
+          ^^^^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/lightning/pytorch/utilities/combined_loader.py", line 78, in __next__
+    out[i] = next(self.iterators[i])
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/torch/utils/data/dataloader.py", line 701, in __next__
+    data = self._next_data()
+           ^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/torch/utils/data/dataloader.py", line 1465, in _next_data
+    return self._process_data(data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/torch/utils/data/dataloader.py", line 1491, in _process_data
+    data.reraise()
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/torch/_utils.py", line 715, in reraise
+    raise exception
+KeyError: Caught KeyError in DataLoader worker process 0.
+Original Traceback (most recent call last):
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/torch/utils/data/_utils/worker.py", line 351, in _worker_loop
+    data = fetcher.fetch(index)  # type: ignore[possibly-undefined]
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/torch/utils/data/_utils/fetch.py", line 50, in fetch
+    data = self.dataset.__getitems__(possibly_batched_index)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/.conda/envs/primal-imu/lib/python3.12/site-packages/torch/utils/data/dataset.py", line 420, in __getitems__
+    return [self.dataset[self.indices[idx]] for idx in indices]
+            ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/n/home01/ppuma/Github/primal-imu/primal/data/amass_smplx.py", line 58, in __getitem__
+    jts = torch.tensor(data['jts_body']).float()[::stride]
+                       ~~~~^^^^^^^^^^^^
+KeyError: 'jts_body'
+
+
+Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.
+Epoch 0:   0%|          | 0/33 [00:07<?, ?it/s]
