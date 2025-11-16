@@ -2,19 +2,19 @@
 This script is to transform the body parameters to Y-up.
 """
 
-from mop_repr import SMPLXParser
+from primal.utils.mop_repr import SMPLXParser
 import os.path as osp
 import os, glob
 import numpy as np
 import torch
 from tqdm import tqdm
 
-# load raw amass sequence files
-amass_path = 'datasets/AMASS/AMASS_SMPLX_NEUTRAL'
-seqfiles = sorted(glob.glob(osp.join(amass_path, '*/*/*.npz')))
+# load raw amass sequence files - use environment variables or defaults
+amass_path = os.getenv('AMASS_DATA_PATH', 'datasets/AMASS/AMASS_SMPLX_NEUTRAL')
+seqfiles = sorted(glob.glob(osp.join(amass_path, '*/*/*.npz'), recursive=True))
 
-# load smplx parser
-smplx_path = 'model-registry'
+# load smplx parser - use environment variables or defaults
+smplx_path = os.getenv('MODEL_REGISTRY_PATH', 'model-registry')
 smplx_parser = SMPLXParser(osp.join(smplx_path,"models/SMPLX/neutral/SMPLX_neutral.npz"),
                                    osp.join(osp.dirname(osp.abspath(__file__)),"SSM2.json"),
                                    num_betas=16)
@@ -23,14 +23,20 @@ smplx_parser.cuda()
 
 
 # main loop
-for seqfile in seqfiles:
+print(f"Found {len(seqfiles)} files to process")
+for seqfile in tqdm(seqfiles):
     
     ## load data
-    print(f'process: {seqfile}')
     try:
-        data = np.load(seqfile)
+        data = np.load(seqfile, allow_pickle=True)
+        
+        # Skip if jts_body already exists
+        if 'jts_body' in data:
+            continue
+            
         trans = torch.tensor(data['trans']).float().cuda() #[t,3]
-    except:
+    except Exception as e:
+        print(f"Error loading {seqfile}: {e}")
         continue
     glorot_aa = torch.tensor(data['root_orient']).float().cuda()#[t,3]
     pose_body = torch.tensor(data['pose_body']).float().cuda() #[t,63]
@@ -62,18 +68,22 @@ for seqfile in seqfiles:
     output_data['jts_body'] = jts_body_np
     output_data['betas'] = data['betas']
     output_data['pose_body'] = data['pose_body']
-    output_data['pose_hand'] = data['pose_hand']
-    output_data['pose_jaw'] = data['pose_jaw']
-    output_data['pose_eye'] = data['pose_eye']
+    
+    # Copy optional fields if they exist
+    for key in ['pose_hand', 'pose_jaw', 'pose_eye']:
+        if key in data:
+            output_data[key] = data[key]
     
     ## solve output path
-    ## create dirs
-    outputseqfile = seqfile.replace('AMASS_SMPLX_NEUTRAL', 'AMASS_SMPLX_NEUTRAL_YUP_wjts')
+    ## save in-place (overwrite existing file with jts_body added)
+    outputseqfile = seqfile
     outputseqdir = osp.dirname(outputseqfile)
 
     os.makedirs(outputseqdir, exist_ok=True)
 
     np.savez(outputseqfile, **output_data)
+
+print("\nConversion complete! All files now have jts_body key.")
 
 
 
