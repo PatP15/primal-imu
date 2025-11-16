@@ -1,14 +1,16 @@
 #!/bin/bash
 
 #SBATCH -J primal_ardiffusion
-#SBATCH -p seas_gpu
+#SBATCH -p test_gpu
 #SBATCH -c 8
-#SBATCH -t 96:00:00
+#SBATCH -t 1:00:00
 #SBATCH --mem=64G
 #SBATCH -o /n/home01/ppuma/primal-imu/logs/ardiffusion_%j.out
 #SBATCH -e /n/home01/ppuma/primal-imu/logs/ardiffusion_%j.err
 #SBATCH --gres=gpu:1
 
+export AMASS_DATA_PATH=/n/netscratch/walsh_lab_seas/Everyone/ppuma/datasets/AMASS/amass_data
+export MODEL_REGISTRY_PATH=/n/netscratch/walsh_lab_seas/Everyone/ppuma/model-registry
 # Load the required Python module.
 module load python/3.12.8-fasrc01
 
