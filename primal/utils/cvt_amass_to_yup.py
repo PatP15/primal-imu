@@ -24,6 +24,17 @@ smplx_parser.cuda()
 
 # main loop
 print(f"Found {len(seqfiles)} files to process")
+
+# Track statistics
+stats = {
+    'total': len(seqfiles),
+    'already_has_jts': 0,
+    'missing_keys': 0,
+    'load_errors': 0,
+    'process_errors': 0,
+    'successful': 0
+}
+
 for seqfile in tqdm(seqfiles):
     
     ## load data
@@ -32,6 +43,7 @@ for seqfile in tqdm(seqfiles):
         
         # Skip if jts_body already exists
         if 'jts_body' in data:
+            stats['already_has_jts'] += 1
             continue
         
         # Check for all required keys before processing
@@ -39,11 +51,13 @@ for seqfile in tqdm(seqfiles):
         missing_keys = [key for key in required_keys if key not in data]
         if missing_keys:
             print(f"Skipping {seqfile}: missing keys {missing_keys}")
+            stats['missing_keys'] += 1
             continue
             
         trans = torch.tensor(data['trans']).float().cuda() #[t,3]
     except Exception as e:
         print(f"Error loading {seqfile}: {e}")
+        stats['load_errors'] += 1
         continue
     
     try:
@@ -97,13 +111,28 @@ for seqfile in tqdm(seqfiles):
         os.makedirs(outputseqdir, exist_ok=True)
 
         np.savez(outputseqfile, **output_data)
+        stats['successful'] += 1
+        
     except Exception as e:
         print(f"Error processing {seqfile}: {e}")
         # Clean up GPU memory even on error
         torch.cuda.empty_cache()
+        stats['process_errors'] += 1
         continue
 
-print("\nConversion complete! All files now have jts_body key.")
+# Print summary
+print("\n" + "="*60)
+print("CONVERSION SUMMARY")
+print("="*60)
+print(f"Total files found:           {stats['total']}")
+print(f"Already had jts_body:        {stats['already_has_jts']}")
+print(f"Successfully processed:       {stats['successful']}")
+print(f"Skipped (missing keys):       {stats['missing_keys']}")
+print(f"Load errors:                 {stats['load_errors']}")
+print(f"Processing errors:           {stats['process_errors']}")
+print(f"\nValid files (with jts_body): {stats['already_has_jts'] + stats['successful']}")
+print(f"Invalid files (skipped):      {stats['missing_keys'] + stats['load_errors'] + stats['process_errors']}")
+print("="*60)
 
 
 
