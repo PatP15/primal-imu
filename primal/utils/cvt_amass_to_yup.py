@@ -45,50 +45,63 @@ for seqfile in tqdm(seqfiles):
     except Exception as e:
         print(f"Error loading {seqfile}: {e}")
         continue
-    glorot_aa = torch.tensor(data['root_orient']).float().cuda()#[t,3]
-    pose_body = torch.tensor(data['pose_body']).float().cuda() #[t,63]
-    nt = trans.shape[0]
-    betas = torch.tensor(data['betas']).float().cuda().repeat(nt,1) #[t,3]
     
-    ## process data (transform to Y-up)
-    ## to change Z-up to Y-up, we just need to rotate x axis by 90 deg
-    transf_transl = torch.zeros(1,1,3).cuda() #[0,0,0]
-    transf_rotmat = torch.tensor(
-        [ [1.0000000,  0.0000000,  0.0000000],
-          [0.0000000,  0.0000000, -1.0000000],
-          [0.0000000,  1.0000000,  0.0000000 ]]
-    ).unsqueeze(0).float().cuda()
-    
-    ## update smplx params
-    xb = torch.cat([trans, glorot_aa,pose_body],dim=-1)
-    xb_new = smplx_parser.update_transl_glorot(transf_rotmat, transf_transl, betas,xb)
-    jts_body = smplx_parser.forward_smplx(betas, xb_new[:,:3], xb_new[:,3:6], xb_new[:,6:69],returntype='jts')[:,:22]
+    try:
+        glorot_aa = torch.tensor(data['root_orient']).float().cuda()#[t,3]
+        pose_body = torch.tensor(data['pose_body']).float().cuda() #[t,63]
+        nt = trans.shape[0]
+        betas = torch.tensor(data['betas']).float().cuda().repeat(nt,1) #[t,3]
+        
+        ## process data (transform to Y-up)
+        ## to change Z-up to Y-up, we just need to rotate x axis by 90 deg
+        transf_transl = torch.zeros(1,1,3).cuda() #[0,0,0]
+        transf_rotmat = torch.tensor(
+            [ [1.0000000,  0.0000000,  0.0000000],
+              [0.0000000,  0.0000000, -1.0000000],
+              [0.0000000,  1.0000000,  0.0000000 ]]
+        ).unsqueeze(0).float().cuda()
+        
+        ## update smplx params
+        xb = torch.cat([trans, glorot_aa,pose_body],dim=-1)
+        xb_new = smplx_parser.update_transl_glorot(transf_rotmat, transf_transl, betas,xb)
+        jts_body = smplx_parser.forward_smplx(betas, xb_new[:,:3], xb_new[:,3:6], xb_new[:,6:69],returntype='jts')[:,:22]
 
-    ## save data
-    trans_new = xb_new[:,:3].detach().cpu().numpy()
-    glorot_aa_new = xb_new[:,3:6].detach().cpu().numpy()
-    jts_body_np = jts_body.detach().cpu().numpy()
-    output_data = {}
-    output_data['mocap_frame_rate'] = data['mocap_frame_rate']
-    output_data['trans'] = trans_new
-    output_data['root_orient'] = glorot_aa_new
-    output_data['jts_body'] = jts_body_np
-    output_data['betas'] = data['betas']
-    output_data['pose_body'] = data['pose_body']
-    
-    # Copy optional fields if they exist
-    for key in ['pose_hand', 'pose_jaw', 'pose_eye']:
-        if key in data:
-            output_data[key] = data[key]
-    
-    ## solve output path
-    ## save in-place (overwrite existing file with jts_body added)
-    outputseqfile = seqfile
-    outputseqdir = osp.dirname(outputseqfile)
+        ## save data
+        trans_new = xb_new[:,:3].detach().cpu().numpy()
+        glorot_aa_new = xb_new[:,3:6].detach().cpu().numpy()
+        jts_body_np = jts_body.detach().cpu().numpy()
+        
+        # Explicitly delete GPU tensors to free memory
+        del trans, glorot_aa, pose_body, betas, transf_transl, transf_rotmat
+        del xb, xb_new, jts_body
+        torch.cuda.empty_cache()
+        
+        output_data = {}
+        output_data['mocap_frame_rate'] = data['mocap_frame_rate']
+        output_data['trans'] = trans_new
+        output_data['root_orient'] = glorot_aa_new
+        output_data['jts_body'] = jts_body_np
+        output_data['betas'] = data['betas']
+        output_data['pose_body'] = data['pose_body']
+        
+        # Copy optional fields if they exist
+        for key in ['pose_hand', 'pose_jaw', 'pose_eye']:
+            if key in data:
+                output_data[key] = data[key]
+        
+        ## solve output path
+        ## save in-place (overwrite existing file with jts_body added)
+        outputseqfile = seqfile
+        outputseqdir = osp.dirname(outputseqfile)
 
-    os.makedirs(outputseqdir, exist_ok=True)
+        os.makedirs(outputseqdir, exist_ok=True)
 
-    np.savez(outputseqfile, **output_data)
+        np.savez(outputseqfile, **output_data)
+    except Exception as e:
+        print(f"Error processing {seqfile}: {e}")
+        # Clean up GPU memory even on error
+        torch.cuda.empty_cache()
+        continue
 
 print("\nConversion complete! All files now have jts_body key.")
 
