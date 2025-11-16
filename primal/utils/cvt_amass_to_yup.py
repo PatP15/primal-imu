@@ -33,6 +33,13 @@ for seqfile in tqdm(seqfiles):
         # Skip if jts_body already exists
         if 'jts_body' in data:
             continue
+        
+        # Check for all required keys before processing
+        required_keys = ['trans', 'root_orient', 'pose_body', 'betas', 'mocap_frame_rate']
+        missing_keys = [key for key in required_keys if key not in data]
+        if missing_keys:
+            print(f"Skipping {seqfile}: missing keys {missing_keys}")
+            continue
             
         trans = torch.tensor(data['trans']).float().cuda() #[t,3]
     except Exception as e:
