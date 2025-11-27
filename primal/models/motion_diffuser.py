@@ -2660,6 +2660,36 @@ class ARDiffusionAcceleration(ARDiffusion):
     Inherits from ARDiffusion and overrides methods to use accelerations.
     """
     
+    def _setup_denoiser(self, cfg):
+        """
+        Setup denoiser with updated x_dim to include velocity and acceleration.
+        """
+        self.mrepr = cfg.get('motion_repr', 'smplx_jts_locs_velocity')
+        if self.mrepr == 'smplx_jts_locs_velocity':
+            # 3 (trans) + 3 (root rot) + 63 (pose) + 66 (jts) + 66 (vel) + 66 (acc)
+            self.n_dim_rot = 3
+            self.n_kpts = 22
+            # x_dim = pose (69) + kpts (66) + vel (66) + acc (66)
+            self.x_dim = 3 + 3 + (self.n_kpts-1)*3 + self.n_kpts*3 + self.n_kpts*3 + self.n_kpts*3
+        elif self.mrepr == 'smplx_jts_locs_velocity_rotcont':
+            # 3 (trans) + 6 (root rot) + 126 (pose) + 66 (jts) + 66 (vel) + 66 (acc)
+            self.n_dim_rot = 6
+            self.n_kpts = 22
+            self.x_dim = 3 + 6 + (self.n_kpts-1)*6 + self.n_kpts*3 + self.n_kpts*3 + self.n_kpts*3
+        else:
+            raise NotImplementedError(f"Motion representation {self.mrepr} not supported for ARDiffusionAcceleration")
+
+        self.denoiser = TransformerInContext(
+            self.x_dim, self.x_dim,
+            cfg.network.h_dim,
+            cfg.network.n_layer,
+            cfg.network.n_head,
+            dropout=cfg.network.dropout,
+            n_time_embeddings=cfg.scheduler.num_train_timesteps,
+            separate_condition_token=cfg.network.get('separate_condition_token', True),
+            use_positional_encoding=cfg.network.get('use_positional_encoding', True),
+        )
+
     def forward_one(self, batch):
         """
         Training forward pass using accelerations instead of velocities.
@@ -2691,25 +2721,28 @@ class ARDiffusionAcceleration(ARDiffusion):
             ## forward kinematics
             kpts = self._fwd_smplx_seq(betas, xb)
             
-            # Compute acceleration (second derivative)
-            # acc = kpts[:,2:] - 2*kpts[:,1:-1] + kpts[:,:-2]
-            # Alternative: via velocities
+            # Compute velocity and acceleration
             vel = kpts[:,1:] - kpts[:,:-1]
             acc = vel[:,1:] - vel[:,:-1]
             
             if self.use_metric_velocity:
                 acc = acc * (self.fps ** 2)  # Acceleration scales with fps^2
+                vel = vel * self.fps
             
-            # Lose 2 frames instead of 1
-            xb = xb[:,:-2]
-            kpts = kpts[:,:-2]
+            # Slice to match length T-2 (acc length)
+            # kpts len T, vel len T-1, acc len T-2
+            xb = xb[:,:-2]          # T-2
+            kpts = kpts[:,:-2]      # T-2
+            vel = vel[:,:-1]        # T-1 -> T-2
+            
             nb, nt = xb.shape[:2]
             
             xs = torch.cat(
                 [
                     xb, 
                     kpts.reshape(nb, nt, -1),
-                    acc.reshape(nb, nt, -1)  # Use acceleration instead of velocity
+                    vel.reshape(nb, nt, -1),
+                    acc.reshape(nb, nt, -1)
                 ], dim=-1)
             
             ## add noise to the motion seed
@@ -2736,7 +2769,8 @@ class ARDiffusionAcceleration(ARDiffusion):
         )
         
         ## decompose prediction
-        xb_pred = xs_pred[...,:-self.n_kpts*6]
+        # xb is at the start
+        xb_pred = xs_pred[...,:xb.shape[-1]]
         
         # Compute the loss
         ## denoiser loss
@@ -2750,10 +2784,14 @@ class ARDiffusionAcceleration(ARDiffusion):
         losses['loss_fk'] = fn_dist_fk(kpts_pred_fk, kpts)
 
         ## acceleration consistency
+        # kpts_pred_fk has length T-2. 
+        # Second derivative reduces length by 2 again -> T-4
         acc_pred_fk = kpts_pred_fk[:,2:] - 2*kpts_pred_fk[:,1:-1] + kpts_pred_fk[:,:-2]
         if self.use_metric_velocity:
             acc_pred_fk = acc_pred_fk * (self.fps ** 2)
-        losses['loss_acc'] = fn_dist_acc(acc, acc_pred_fk)
+        
+        # Slice ground truth acc to match T-4
+        losses['loss_acc'] = fn_dist_acc(acc[:,:-2], acc_pred_fk)
                 
         ## total loss
         losses['loss'] = self.hparams.weight_simple*losses['loss_simple']  \
@@ -2809,6 +2847,7 @@ class ARDiffusionAcceleration(ARDiffusion):
         tt = 0
         xb_gen = []
         kpts_gen = []
+        vel_gen = []
         acc_gen = []
         acc_gen_avg = []
 
@@ -2848,9 +2887,12 @@ class ARDiffusionAcceleration(ARDiffusion):
                 acc_seed_c = vel_seed_c[:,1:] - vel_seed_c[:,:-1]
                 if self.use_metric_velocity:
                     acc_seed_c = acc_seed_c * (self.fps ** 2)
+                    vel_seed_c = vel_seed_c * self.fps
 
+                # Slice for input
                 xb_seed_c = xb[:,:-2]
                 kpts_seed_c = kpts[:,:-2]
+                vel_seed_c = vel_seed_c[:,:-1]
                 
             else:
                 ## recompute keypoint locations and accelerations
@@ -2870,28 +2912,21 @@ class ARDiffusionAcceleration(ARDiffusion):
                         kpts_seed_w-transl_c.unsqueeze(-2)
                     )
                 
-                # Need last 2 frames to compute acceleration
-                # For simplicity, recompute from keypoints
-                if kpts_seed_c.shape[1] >= 2:
-                    vel_seed_c = kpts_seed_c[:,1:] - kpts_seed_c[:,:-1]
-                    if vel_seed_c.shape[1] >= 1:
-                        acc_seed_c = vel_seed_c[:,1:] - vel_seed_c[:,:-1]
-                    else:
-                        # Fallback: use previous window's acceleration
-                        acc_seed_w = acc_gen_w_[:,-1:].detach().clone()
-                        acc_seed_c = torch.einsum(
-                            'bij,btpj->btpi', 
-                            rotmat_c.permute(0,2,1),
-                            acc_seed_w
-                        )
-                else:
-                    # Fallback: use previous window's acceleration
-                    acc_seed_w = acc_gen_w_[:,-1:].detach().clone()
-                    acc_seed_c = torch.einsum(
-                        'bij,btpj->btpi', 
-                        rotmat_c.permute(0,2,1),
-                        acc_seed_w
-                    )
+                # Get velocity and acceleration from previous window's end
+                # We need at least 1 frame of vel and 1 frame of acc
+                vel_seed_w = vel_gen_w_[:,-1:].detach().clone()
+                vel_seed_c = torch.einsum(
+                    'bij,btpj->btpi', 
+                    rotmat_c.permute(0,2,1),
+                    vel_seed_w
+                )
+                
+                acc_seed_w = acc_gen_w_[:,-1:].detach().clone()
+                acc_seed_c = torch.einsum(
+                    'bij,btpj->btpi', 
+                    rotmat_c.permute(0,2,1),
+                    acc_seed_w
+                )
 
             if use_acc_perburbation and tt==0:
                 if perform_principled_action=='left_kick':
@@ -2927,6 +2962,7 @@ class ARDiffusionAcceleration(ARDiffusion):
             
             xs_seed = torch.cat([xb_seed_c, 
                                 kpts_seed_c.reshape(nb, 1, -1),
+                                vel_seed_c.reshape(nb, 1, -1),
                                 acc_seed_c.reshape(nb, 1, -1)],  # Use acceleration
                                 dim=-1)
             
@@ -2963,7 +2999,7 @@ class ARDiffusionAcceleration(ARDiffusion):
 
                     ## 2) facing direction (same as base class)
                     ori_cn = ori_c / (ori_c.norm(dim=-1,keepdim=True) + 1e-6)
-                    kpts_reshaped = modeloutput[...,-6*self.n_kpts:-3*self.n_kpts].reshape(nb, -1, self.n_kpts, 3)
+                    kpts_reshaped = modeloutput[...,-9*self.n_kpts:-6*self.n_kpts].reshape(nb, -1, self.n_kpts, 3) # Adjust indices for 3 sets of kpts/vel/acc
                     kpts_last = kpts_reshaped[:,-1]
                     x_axis = kpts_last[:,1] - kpts_last[:,2]
                     x_axis[...,1] = 0
@@ -2977,7 +3013,13 @@ class ARDiffusionAcceleration(ARDiffusion):
                     grad_kpts_all[:,-1:,1] = grad_p
                     grad_kpts_all[:,-1:,2] = -grad_p
                     grad_facing = torch.zeros_like(input)
-                    grad_facing[...,-6*self.n_kpts:-3*self.n_kpts] = grad_kpts_all.reshape(nb, nt_tw, -1)
+                    # Need to target kpts part of input
+                    # Input structure: xb | kpts | vel | acc
+                    # Indices: 
+                    # Acc: -3*n_kpts : end
+                    # Vel: -6*n_kpts : -3*n_kpts
+                    # Kpts: -9*n_kpts : -6*n_kpts
+                    grad_facing[...,-9*self.n_kpts:-6*self.n_kpts] = grad_kpts_all.reshape(nb, nt_tw, -1)
 
                     guidance_grad_ori = -(guidance_weight_facing * grad_facing 
                                             + guidance_weight_mv * grad_mv)
@@ -2993,7 +3035,7 @@ class ARDiffusionAcceleration(ARDiffusion):
 
             ## project to above the ground floor
             if snap_to_ground: 
-                xb_pred = input[:,:,:-self.n_kpts*6]
+                xb_pred = input[:,:,:-self.n_kpts*9] # 3 sets of kpts-like data
                 jts_c = self._fwd_smplx_seq(betas.repeat(1, nt_tw, 1), xb_pred)
                 jts_w = torch.einsum('bij,btpj->btpi', rotmat_c, jts_c)+transl_c.unsqueeze(-2)
                 heights = jts_w[...,1]
@@ -3019,18 +3061,21 @@ class ARDiffusionAcceleration(ARDiffusion):
             start_event.record()
             output_betas = betas.repeat(1, nt_tw, 1)
             
-            xb_gen_c = output[...,:-self.n_kpts*6]
-            kpts_gen_c = output[...,-self.n_kpts*6:-self.n_kpts*3].reshape(nb,-1,self.n_kpts,3)
-            acc_gen_c = output[...,-self.n_kpts*3:].reshape(nb,-1,self.n_kpts,3)  # Acceleration
+            xb_gen_c = output[...,:-self.n_kpts*9]
+            kpts_gen_c = output[...,-self.n_kpts*9:-self.n_kpts*6].reshape(nb,-1,self.n_kpts,3)
+            vel_gen_c = output[...,-self.n_kpts*6:-self.n_kpts*3].reshape(nb,-1,self.n_kpts,3)
+            acc_gen_c = output[...,-self.n_kpts*3:].reshape(nb,-1,self.n_kpts,3)
             
             ## transform back to the original world coordinate
             xb_gen_w_ = self.smplx_parser.update_transl_glorot_seq(
                 rotmat_c, transl_c, output_betas, xb_gen_c, fwd_transf=True)
             kpts_gen_w_ = torch.einsum('bij,btpj->btpi', rotmat_c, kpts_gen_c) + transl_c.unsqueeze(-2)
+            vel_gen_w_ = torch.einsum('bij,btpj->btpi', rotmat_c, vel_gen_c)
             acc_gen_w_ = torch.einsum('bij,btpj->btpi', rotmat_c, acc_gen_c)
             
             xb_gen.append(xb_gen_w_[:,:-2].detach().clone())  # Lose 2 frames
             kpts_gen.append(kpts_gen_w_[:,:-2].detach().clone())
+            vel_gen.append(vel_gen_w_[:,:-2].detach().clone())
             acc_gen.append(acc_gen_w_[:,:-2].detach().clone())
             acc_gen_avg.append(acc_gen_w_[:,:-2].mean(dim=[1,2],keepdim=True).repeat(1,nt_tw-2,1,1).detach().clone())
             
@@ -3047,15 +3092,12 @@ class ARDiffusionAcceleration(ARDiffusion):
         else:
             xb_gen_aa = xb_gen
         kpts_gen = torch.cat(kpts_gen, dim=1)
+        vel_gen = torch.cat(vel_gen, dim=1)
         acc_gen = torch.cat(acc_gen, dim=1)
         acc_gen_avg = torch.cat(acc_gen_avg, dim=1)
         if not self.use_metric_velocity:
             acc_gen *= (self.fps ** 2)
             acc_gen_avg *= (self.fps ** 2)
-        
-        # For visualization, compute velocities from keypoints
-        vel_gen = kpts_gen[:,1:] - kpts_gen[:,:-1]
-        if not self.use_metric_velocity:
             vel_gen *= self.fps
         
         ################# generate rays: start ######################
